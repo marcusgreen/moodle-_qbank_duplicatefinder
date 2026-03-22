@@ -26,6 +26,7 @@ require_once(__DIR__ . '/../../../config.php');
 require_once($CFG->dirroot . '/question/editlib.php');
 
 use qbank_duplicatefinder\helper;
+use qbank_duplicatefinder\report_form;
 
 global $CFG, $DB, $OUTPUT, $PAGE, $COURSE;
 
@@ -36,21 +37,10 @@ global $CFG, $DB, $OUTPUT, $PAGE, $COURSE;
 $cmid     = optional_param('cmid', 0, PARAM_INT);
 $courseid = optional_param('courseid', 0, PARAM_INT);
 
-// Report-specific parameters.
-$categoryid       = optional_param('categoryid', 0, PARAM_INT);
-$defaultthreshold = (int) get_config('qbank_duplicatefinder', 'defaultthreshold') ?: 70;
-$threshold        = optional_param('threshold', $defaultthreshold, PARAM_INT);
-$scope            = optional_param('scope', 'category', PARAM_ALPHA);
-$dosearch   = optional_param('dosearch', 0, PARAM_BOOL);
-
-if ($dosearch) {
-    require_sesskey();
-}
-
 // Auth and context setup.
 
 if ($cmid) {
-    [$module, $cm] = get_module_from_cmid($cmid);
+    [, $cm] = get_module_from_cmid($cmid);
     require_login($cm->course, false, $cm);
     $thiscontext = context_module::instance($cmid);
 } else if ($courseid) {
@@ -92,34 +82,54 @@ foreach ($allcategories as $cat) {
     $categoryoptions[$cat->id] = format_string($cat->name);
 }
 
-// Default to first category if none supplied.
-if (!$categoryid && !empty($categoryoptions)) {
-    $categoryid = array_key_first($categoryoptions);
-}
+// Default threshold from plugin settings.
+$defaultthreshold = (int) get_config('qbank_duplicatefinder', 'defaultthreshold') ?: 70;
 
-// Run the duplicate search.
+// Build and process the form.
+
+$form = new report_form($baseurl->out(false), [
+    'categoryoptions'  => $categoryoptions,
+    'defaultthreshold' => $defaultthreshold,
+]);
+
+// Default to first category if none supplied.
+$defaultcategoryid = !empty($categoryoptions) ? array_key_first($categoryoptions) : 0;
+
+// Run the duplicate search if the form was submitted and valid.
 
 $groups    = [];
 $questions = [];
 $toomany   = false;
+$formdata  = $form->get_data();
 
-if ($dosearch && $categoryid) {
-    if ($scope === 'context') {
-        $catids = helper::get_context_category_ids($thiscontext);
-    } else {
-        $catids = helper::get_category_ids_recursive($categoryid);
+if ($formdata) {
+    $categoryid = (int) $formdata->categoryid;
+    $scope      = $formdata->scope;
+    $threshold  = max(1, min(100, (int) $formdata->threshold));
+
+    if ($categoryid) {
+        if ($scope === 'context') {
+            $catids = helper::get_context_category_ids($thiscontext);
+        } else {
+            $catids = helper::get_category_ids_recursive($categoryid);
+        }
+
+        $questions     = helper::load_questions($catids);
+        $questioncount = count($questions);
+
+        if ($questioncount > helper::MAX_QUESTIONS) {
+            $toomany   = true;
+            $questions = array_slice($questions, 0, helper::MAX_QUESTIONS);
+        }
+
+        $groups = helper::find_duplicate_groups($questions, (float) $threshold);
     }
-
-    $questions      = helper::load_questions($catids);
-    $questioncount  = count($questions);
-
-    if ($questioncount > helper::MAX_QUESTIONS) {
-        $toomany   = true;
-        $questions = array_slice($questions, 0, helper::MAX_QUESTIONS);
-    }
-
-    $threshold = max(1, min(100, $threshold));
-    $groups    = helper::find_duplicate_groups($questions, (float) $threshold);
+} else {
+    $form->set_data([
+        'categoryid' => $defaultcategoryid,
+        'scope'      => 'category',
+        'threshold'  => $defaultthreshold,
+    ]);
 }
 
 // Render.
@@ -127,71 +137,10 @@ if ($dosearch && $categoryid) {
 echo $OUTPUT->header();
 echo $OUTPUT->heading(get_string('duplicatereport', 'qbank_duplicatefinder'));
 
-// Search form.
-?>
-<form method="post" action="<?php echo $baseurl->out(false); ?>" class="mb-4">
-    <?php echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'sesskey', 'value' => sesskey()]); ?>
-    <?php echo html_writer::empty_tag('input', ['type' => 'hidden', 'name' => 'dosearch', 'value' => '1']); ?>
-
-    <div class="row g-3 align-items-end">
-
-        <div class="col-md-4">
-            <label for="categoryid" class="form-label fw-semibold">
-                <?php echo get_string('categoryid', 'qbank_duplicatefinder'); ?>
-            </label>
-            <?php
-            echo html_writer::select(
-                $categoryoptions,
-                'categoryid',
-                $categoryid,
-                false,
-                ['id' => 'categoryid', 'class' => 'form-select']
-            );
-            ?>
-        </div>
-
-        <div class="col-md-3">
-            <label for="scope" class="form-label fw-semibold">
-                <?php echo get_string('scope', 'qbank_duplicatefinder'); ?>
-                <?php echo $OUTPUT->help_icon('scope', 'qbank_duplicatefinder'); ?>
-            </label>
-            <?php
-            echo html_writer::select(
-                [
-                    'category' => get_string('scope_category', 'qbank_duplicatefinder'),
-                    'context'  => get_string('scope_context', 'qbank_duplicatefinder'),
-                ],
-                'scope',
-                $scope,
-                false,
-                ['id' => 'scope', 'class' => 'form-select']
-            );
-            ?>
-        </div>
-
-        <div class="col-md-2">
-            <label for="threshold" class="form-label fw-semibold">
-                <?php echo get_string('threshold', 'qbank_duplicatefinder'); ?>
-                <?php echo $OUTPUT->help_icon('threshold', 'qbank_duplicatefinder'); ?>
-            </label>
-            <input type="number" id="threshold" name="threshold"
-                   value="<?php echo (int) $threshold; ?>"
-                   min="1" max="100" class="form-control">
-        </div>
-
-        <div class="col-md-2">
-            <label class="form-label d-block">&nbsp;</label>
-            <button type="submit" class="btn btn-primary w-100">
-                <?php echo get_string('search', 'qbank_duplicatefinder'); ?>
-            </button>
-        </div>
-
-    </div>
-</form>
-<?php
+$form->display();
 
 // Results.
-if ($dosearch) {
+if ($formdata) {
     if ($toomany) {
         echo $OUTPUT->notification(
             get_string('verylargequestionbank', 'qbank_duplicatefinder', $questioncount),
@@ -216,9 +165,9 @@ if ($dosearch) {
                 ['class' => 'mt-4']
             );
 
-            $table              = new html_table();
-            $table->attributes  = ['class' => 'table table-bordered table-sm generaltable mb-4'];
-            $table->head        = [
+            $table             = new html_table();
+            $table->attributes = ['class' => 'table table-bordered table-sm generaltable mb-4'];
+            $table->head       = [
                 get_string('questionname', 'qbank_duplicatefinder'),
                 get_string('questiontype', 'qbank_duplicatefinder'),
                 get_string('category', 'qbank_duplicatefinder'),
@@ -236,7 +185,6 @@ if ($dosearch) {
                 $preview = shorten_text(strip_tags($q->questiontext), 120);
 
                 // Edit URL — uses the raw question.id (the specific version row).
-                // This opens the question editor for that version.
                 $editurl = new moodle_url('/question/bank/editquestion/question.php', [
                     'id'       => $q->id,
                     'courseid' => $courseid ?: ($cmid ? $cm->course : SITEID),
@@ -260,12 +208,11 @@ if ($dosearch) {
                     ? html_writer::tag(
                         'span',
                         get_string('baseline', 'qbank_duplicatefinder'),
-                        ['class' => 'badge bg-secondary']
+                        ['class' => 'badge bg-secondary text-dark', 'style' => 'font-size:1.1em;']
                     )
-                    : html_writer::tag(
-                        'span',
-                        get_string('percentmatch', 'qbank_duplicatefinder', number_format($sim, 1)),
-                        ['class' => self_similarity_badge_class($sim)]
+                    : helper::similarity_badge(
+                        $sim,
+                        get_string('percentmatch', 'qbank_duplicatefinder', number_format($sim, 1))
                     );
 
                 $actions = html_writer::link(
@@ -279,7 +226,7 @@ if ($dosearch) {
                         ['class' => 'btn btn-sm btn-outline-primary', 'target' => '_blank']
                     );
 
-                $row   = new html_table_row();
+                $row        = new html_table_row();
                 $row->cells = [
                     format_string($q->name),
                     $q->qtype,
@@ -298,21 +245,3 @@ if ($dosearch) {
 }
 
 echo $OUTPUT->footer();
-
-/**
- * Return a Bootstrap badge class based on the similarity value.
- *
- * @param float $sim Similarity score 0-100.
- * @return string
- * @package    qbank_duplicatefinder
- * @copyright  2026 Marcus Green
- * @license    http://www.gnu.org/copyleft/gpl.html GNU GPL v3 or later
- */
-function self_similarity_badge_class(float $sim): string {
-    if ($sim >= 95) {
-        return 'badge bg-danger';
-    } else if ($sim >= 80) {
-        return 'badge bg-warning text-dark';
-    }
-    return 'badge bg-info text-dark';
-}

@@ -185,10 +185,12 @@ class helper {
             }
         };
 
-        // O(n²) pairwise comparison.
+        // O(n²) pairwise comparison — store scores for reuse when building output.
+        $scores = [];
         for ($i = 0; $i < $count - 1; $i++) {
             for ($j = $i + 1; $j < $count; $j++) {
                 $sim = self::similarity($normalised[$i], $normalised[$j]);
+                $scores[$i][$j] = $sim;
                 if ($sim >= $threshold) {
                     $union($i, $j);
                 }
@@ -210,7 +212,11 @@ class helper {
             }
             $group = [];
             foreach ($members as $idx) {
-                $sim = ($idx === $root) ? null : self::similarity($normalised[$root], $normalised[$idx]);
+                if ($idx === $root) {
+                    $sim = null;
+                } else {
+                    $sim = $idx > $root ? $scores[$root][$idx] : $scores[$idx][$root];
+                }
                 $group[] = [
                     'question'   => $questions[$idx],
                     'similarity' => $sim,
@@ -263,5 +269,28 @@ class helper {
     public static function get_context_category_ids(\context $context): array {
         global $DB;
         return $DB->get_fieldset_select('question_categories', 'id', 'contextid = :ctxid', ['ctxid' => $context->id]);
+    }
+
+    /**
+     * Return a rendered Bootstrap badge with an icon for the given similarity score.
+     *
+     * @param float  $sim  Similarity score 0-100.
+     * @param string $text Label text to display inside the badge.
+     * @return string HTML span element.
+     */
+    public static function similarity_badge(float $sim, string $text): string {
+        if ($sim >= 95) {
+            $class = 'badge bg-danger';
+            $icon  = 'fa fa-circle-exclamation';
+        } else if ($sim >= 80) {
+            $class = 'badge bg-warning text-dark';
+            $icon  = 'fa fa-triangle-exclamation';
+        } else {
+            $class = 'badge bg-info text-dark';
+            $icon  = 'fa fa-circle-info';
+        }
+
+        $iconhtml = \html_writer::tag('i', '', ['class' => $icon . ' me-1', 'aria-hidden' => 'true']);
+        return \html_writer::tag('span', $iconhtml . $text, ['class' => $class, 'style' => 'font-size:1.1em;']);
     }
 }
